@@ -1,8 +1,11 @@
 21 APIs para el sistema de vehículos IoT
 
 URLs de consulta: 
+
 Link de WebSocket: ws://vehículos-aws-iot.duckdns.org:8000/ws/vehículos/2
+
 Link de Swagger UI: http://vehiculos-aws-iot.duckdns.org:8000/docs
+
 Link de repositorio de Github: https://github.com/Tasava0403/vehiculo_iot.git
 
 1. Módulo de vehículos
