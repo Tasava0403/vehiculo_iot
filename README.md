@@ -9,7 +9,7 @@ Link de Swagger UI: http://vehiculos-aws-iot.duckdns.org:8000/docs
 Link de repositorio de Github: https://github.com/Tasava0403/vehiculo_iot.git
 
 1. Módulo de vehículos
-Administra el registro, consulta, modificación y eliminación de los vehículos del sistema.
+2. Administra el registro, consulta, modificación y eliminación de los vehículos del sistema.
 N.º	Método y endpoint	Función
 1	POST /vehiculos/	Registrar un vehículo nuevo.
 2	GET /vehiculos/	Obtener todos los vehículos registrados.
@@ -17,7 +17,8 @@ N.º	Método y endpoint	Función
 4	PUT /vehiculos/{id_vehiculo}	Actualizar los datos y el estado de un vehículo.
 5	DELETE /vehiculos/{id_vehiculo}	Eliminar un vehículo.
 Procedimientos almacenados: sp_crear_vehiculo, sp_obtener_vehiculos, sp_obtener_vehiculo, sp_actualizar_vehiculo y sp_eliminar_vehiculo.
-2. Módulo de comandos
+
+4. Módulo de comandos
 Permite definir las instrucciones que puede ejecutar cada vehículo, como avanzar, retroceder o girar.
 N.º	Método y endpoint	Función
 6	POST /comandos/	Crear un comando asociado a un vehículo.
