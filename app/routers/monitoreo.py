@@ -1,9 +1,46 @@
 import asyncio
+import json
 from datetime import datetime
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
+from typing import Dict, Set
 from app.database import get_db_connection
-from app.websocket import websocket_manager
+from datetime import datetime, date
+import json
+
+router = APIRouter(tags=["Monitoreo, Historial y Demos WebSocket"])
+
+# --- ADMINISTRADOR DE WEBSOCKETS POR VEHÍCULO ---
+class VehicleWebSocketManager:
+    def __init__(self):
+        self.active_connections: Dict[int, Set[WebSocket]] = {}
+        self.active_demos: Dict[int, asyncio.Task] = {}
+
+    async def connect(self, id_vehiculo: int, websocket: WebSocket):
+        await websocket.accept()
+        if id_vehiculo not in self.active_connections:
+            self.active_connections[id_vehiculo] = set()
+        self.active_connections[id_vehiculo].add(websocket)
+
+    def disconnect(self, id_vehiculo: int, websocket: WebSocket):
+        if id_vehiculo in self.active_connections:
+            self.active_connections[id_vehiculo].discard(websocket)
+            if not self.active_connections[id_vehiculo]:
+                del self.active_connections[id_vehiculo]
+
+    async def broadcast_to_vehicle(self, id_vehiculo: int, message: dict):
+        if id_vehiculo in self.active_connections:
+            disconnected = []
+            for websocket in self.active_connections[id_vehiculo]:
+                try:
+                    await websocket.send_json(message)
+                except Exception:
+                    disconnected.append(websocket)
+            for ws in disconnected:
+                self.disconnect(id_vehiculo, ws)
+
+# Instancia requerida por los endpoints y WebSockets de este archivo
+vehicle_ws_manager = VehicleWebSocketManager()
 
 router = APIRouter(tags=["Monitoreo, Historial y Demos WebSocket"])
 
@@ -206,19 +243,38 @@ async def ejecutar_secuencia_demo(id_vehiculo: int, id_demo: int):
         if id_vehiculo in vehicle_ws_manager.active_demos:
             del vehicle_ws_manager.active_demos[id_vehiculo]
 
-
 @router.post("/vehiculos/{id_vehiculo}/demo/iniciar", summary="Iniciar una Demo en el vehículo")
 async def iniciar_demo(id_vehiculo: int, data: DemoTriggerRequest):
-    """Inicia la ejecución asíncrona de una demo validando concurrencia (impide 2 demos simultáneas por vehículo)."""
+    """Inicia la ejecución asíncrona de una demo validando concurrencia y retorna los movimientos que la componen."""
     if id_vehiculo in vehicle_ws_manager.active_demos and not vehicle_ws_manager.active_demos[id_vehiculo].done():
         raise HTTPException(status_code=400, detail="Ya existe una DEMO en ejecución para este vehículo.")
+
+    # Consultar los movimientos de la demo antes de iniciarla para incluirlos en la respuesta
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.callproc("sp_obtener_movimientos_demo", (data.id_demo,))
+            movimientos = cursor.fetchall()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener los movimientos de la demo: {str(e)}")
+    finally:
+        connection.close()
+
+    if not movimientos:
+        raise HTTPException(status_code=404, detail="La demo no contiene movimientos registrados o no existe.")
 
     # Lanzar tarea en segundo plano vinculada al vehículo
     task = asyncio.create_task(ejecutar_secuencia_demo(id_vehiculo, data.id_demo))
     vehicle_ws_manager.active_demos[id_vehiculo] = task
 
-    return {"mensaje": f"Demo {data.id_demo} iniciada exitosamente para el vehículo {id_vehiculo}"}
+    # Sanitizar posibles fechas u horas dentro de los movimientos antes de serializarlos
+    movimientos_serializables = limpiar_fechas(movimientos)
 
+    return {
+        "mensaje": f"Demo {data.id_demo} iniciada exitosamente para el vehículo {id_vehiculo}",
+        "total_movimientos": len(movimientos_serializables),
+        "movimientos": movimientos_serializables
+    }
 
 @router.post("/vehiculos/{id_vehiculo}/demo/cancelar", summary="Cancelar la Demo en ejecución")
 async def cancelar_demo(id_vehiculo: int):
@@ -234,6 +290,16 @@ async def cancelar_demo(id_vehiculo: int):
 
 # --- ENDPOINT WEBSOCKET POR VEHÍCULO ---
 
+def limpiar_fechas(obj):
+    """Convierte de forma recursiva o directa los campos datetime/date a string ISO."""
+    if isinstance(obj, dict):
+        return {k: limpiar_fechas(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [limpiar_fechas(v) for v in obj]
+    elif isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    return obj
+
 @router.websocket("/ws/vehiculos/{id_vehiculo}")
 async def websocket_vehiculo_endpoint(websocket: WebSocket, id_vehiculo: int):
     """WebSocket asociado al ID del vehículo. Envía el último estado disponible al conectar y aísla los eventos."""
@@ -245,10 +311,14 @@ async def websocket_vehiculo_endpoint(websocket: WebSocket, id_vehiculo: int):
         with connection.cursor() as cursor:
             cursor.callproc("sp_obtener_estado", (id_vehiculo,))
             estado_inicial = cursor.fetchone()
+            
+            # 💡 IMPORTANTE: Limpiamos los campos datetime antes de enviarlos por JSON
+            estado_inicial_serializable = limpiar_fechas(estado_inicial) if estado_inicial else {"conectado": False}
+
             await websocket.send_json({
                 "tipo_evento": "ESTADO_INICIAL",
                 "id_vehiculo": id_vehiculo,
-                "datos": estado_inicial if estado_inicial else {"conectado": False},
+                "datos": estado_inicial_serializable,
                 "marca_temporal": datetime.now().isoformat()
             })
     except Exception as e:
@@ -258,8 +328,6 @@ async def websocket_vehiculo_endpoint(websocket: WebSocket, id_vehiculo: int):
 
     try:
         while True:
-            # Mantener la conexión abierta y escuchar posibles mensajes de clientes
             data = await websocket.receive_text()
-            # Opcional: puedes procesar comandos de control entrantes aquí si se requiere
     except WebSocketDisconnect:
         vehicle_ws_manager.disconnect(id_vehiculo, websocket)

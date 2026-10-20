@@ -4,7 +4,7 @@ from app.routers import vehiculos, comandos, demos, monitoreo
 from app.models.estado import Estado
 from app.services.status_service import StatusService
 from app.websocket.websocket_manager import WebSocketManager
-from app.database import get_db_connection  # Asegúrate de tener este archivo configurado con pymysql
+from app.database import get_db_connection  
 import asyncio
 
 app = FastAPI(title="Servidor IoT", description="API HTTP y WebSocket para práctica IoT", version="1.0")
