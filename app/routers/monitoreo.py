@@ -1,12 +1,10 @@
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, date
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
-from typing import Dict, Set
+from typing import Dict, Set, Union
 from app.database import get_db_connection
-from datetime import datetime, date
-import json
 
 router = APIRouter(tags=["Monitoreo, Historial y Demos WebSocket"])
 
@@ -28,12 +26,16 @@ class VehicleWebSocketManager:
             if not self.active_connections[id_vehiculo]:
                 del self.active_connections[id_vehiculo]
 
-    async def broadcast_to_vehicle(self, id_vehiculo: int, message: dict):
+    async def broadcast_to_vehicle(self, id_vehiculo: int, message: Union[int, dict]):
+        """Permite enviar tanto un código numérico (texto plano) como un diccionario estructurado (JSON)."""
         if id_vehiculo in self.active_connections:
             disconnected = []
             for websocket in self.active_connections[id_vehiculo]:
                 try:
-                    await websocket.send_json(message)
+                    if isinstance(message, dict):
+                        await websocket.send_json(message)
+                    else:
+                        await websocket.send_text(str(message))
                 except Exception:
                     disconnected.append(websocket)
             for ws in disconnected:
@@ -41,8 +43,6 @@ class VehicleWebSocketManager:
 
 # Instancia requerida por los endpoints y WebSockets de este archivo
 vehicle_ws_manager = VehicleWebSocketManager()
-
-router = APIRouter(tags=["Monitoreo, Historial y Demos WebSocket"])
 
 # --- Modelos Pydantic ---
 class EstadoUpdate(BaseModel):
@@ -63,7 +63,7 @@ class DemoTriggerRequest(BaseModel):
 
 @router.get("/vehiculos/{id_vehiculo}/estado", summary="Obtener estado actual del vehículo")
 def obtener_estado(id_vehiculo: int):
-    """Ejecuta el procedimiento almacenado sp_obtener_estado[cite: 1]."""
+    """Ejecuta el procedimiento almacenado sp_obtener_estado."""
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
@@ -80,33 +80,39 @@ def obtener_estado(id_vehiculo: int):
 
 @router.post("/vehiculos/estado", summary="Actualizar estado del vehículo")
 async def actualizar_estado_http(data: EstadoUpdate):
-    """Actualiza el estado y notifica en tiempo real por WebSocket a los clientes de ese vehículo."""
+    """Actualiza el estado, registra automáticamente en el historial y notifica por WebSocket."""
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
+            # 1. Actualizar el estado del vehículo
             cursor.callproc("sp_actualizar_estado", (
                 data.id_vehiculo,
                 data.id_comando,
                 data.conectado
             ))
+
+            # 2. Registrar automáticamente en el historial si hay comando y está conectado
+            if data.id_comando is not None and data.conectado:
+                cursor.callproc("sp_registrar_historial", (
+                    data.id_vehiculo,
+                    data.id_comando,
+                    "AUTOMATICO"
+                ))
+
             connection.commit()
-            
-            # Consultar estado actualizado con nombre de comando para el payload JSON
+
+            # 3. Consultar estado actualizado
             cursor.callproc("sp_obtener_estado", (data.id_vehiculo,))
             estado_actual = cursor.fetchone()
 
-        # Notificar vía WebSocket a todos los clientes suscritos a este vehículo
-        payload = {
-            "tipo_evento": "ACTUALIZACION_ESTADO",
-            "id_vehiculo": data.id_vehiculo,
-            "comando": estado_actual.get("comando") if estado_actual else None,
-            "codigo": estado_actual.get("codigo") if estado_actual else None,
-            "conectado": data.conectado,
-            "marca_temporal": datetime.now().isoformat()
-        }
-        await vehicle_ws_manager.broadcast_to_vehicle(data.id_vehiculo, payload)
+        # Notificar vía WebSocket el código del comando en texto plano
+        codigo_enviar = estado_actual.get("codigo") if estado_actual else 11
+        await vehicle_ws_manager.broadcast_to_vehicle(data.id_vehiculo, codigo_enviar)
 
-        return {"mensaje": "Estado actualizado exitosamente", "estado": estado_actual}
+        return {
+            "mensaje": "Estado actualizado e historial registrado exitosamente", 
+            "estado": estado_actual
+        }
     except Exception as e:
         connection.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -116,7 +122,7 @@ async def actualizar_estado_http(data: EstadoUpdate):
 
 @router.post("/historial/registrar", summary="Registrar movimiento en historial")
 def registrar_historial(data: HistorialCreate):
-    """Ejecuta sp_registrar_historial[cite: 1]."""
+    """Ejecuta sp_registrar_historial."""
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
@@ -136,7 +142,7 @@ def registrar_historial(data: HistorialCreate):
 
 @router.get("/vehiculos/{id_vehiculo}/historial/ultimos-10", summary="Obtener últimos 10 movimientos del historial")
 def obtener_ultimos_10_historial(id_vehiculo: int):
-    """Ejecuta sp_obtener_historial[cite: 1] limitado a los 10 registros más recientes[cite: 1]."""
+    """Ejecuta sp_obtener_historial limitado a los 10 registros más recientes."""
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
@@ -152,7 +158,7 @@ def obtener_ultimos_10_historial(id_vehiculo: int):
 # --- CONTROLADOR ASÍNCRONO DE DEMAS (BACKGROUND TASK) ---
 
 async def ejecutar_secuencia_demo(id_vehiculo: int, id_demo: int):
-    """Procesa los N movimientos de la demo de forma asíncrona, respetando tiempos y actualizando estado[cite: 1]."""
+    """Procesa los N movimientos de la demo de forma asíncrona."""
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
@@ -181,7 +187,7 @@ async def ejecutar_secuencia_demo(id_vehiculo: int, id_demo: int):
         return
 
     try:
-        # Evento de inicio de Demo
+        # Evento de inicio de Demo (Diccionario estructurado)
         await vehicle_ws_manager.broadcast_to_vehicle(id_vehiculo, {
             "tipo_evento": "INICIO_DEMO",
             "id_vehiculo": id_vehiculo,
@@ -191,7 +197,7 @@ async def ejecutar_secuencia_demo(id_vehiculo: int, id_demo: int):
         })
 
         for mov in movimientos:
-            # 1. Actualizar estado del vehículo con el comando actual de la demo (SIN tocar historial)
+            # 1. Actualizar estado del vehículo
             conn_up = get_db_connection()
             try:
                 with conn_up.cursor() as cur_up:
@@ -202,17 +208,8 @@ async def ejecutar_secuencia_demo(id_vehiculo: int, id_demo: int):
             finally:
                 conn_up.close()
 
-            # 2. Emitir mensaje por movimiento vía WebSocket
-            await vehicle_ws_manager.broadcast_to_vehicle(id_vehiculo, {
-                "tipo_evento": "MOVIMIENTO_DEMO",
-                "id_vehiculo": id_vehiculo,
-                "orden": mov["orden"],
-                "comando": mov["comando"],
-                "codigo": mov["codigo"],
-                "duracion_ms": mov["duracion_ms"],
-                "pausa_ms": mov["pausa_ms"],
-                "marca_temporal": datetime.now().isoformat()
-            })
+            # 2. Emitir únicamente el código numérico del movimiento vía WebSocket
+            await vehicle_ws_manager.broadcast_to_vehicle(id_vehiculo, mov["codigo"])
 
             # 3. Respetar duracion_ms
             await asyncio.sleep(mov["duracion_ms"] / 1000.0)
@@ -230,7 +227,7 @@ async def ejecutar_secuencia_demo(id_vehiculo: int, id_demo: int):
         })
 
     except asyncio.CancelledError:
-        # Manejo de cancelación explícita de la Demo
+        # Manejo de cancelación explícita
         await vehicle_ws_manager.broadcast_to_vehicle(id_vehiculo, {
             "tipo_evento": "CANCELACION_DEMO",
             "id_vehiculo": id_vehiculo,
@@ -239,17 +236,16 @@ async def ejecutar_secuencia_demo(id_vehiculo: int, id_demo: int):
         })
         raise
     finally:
-        # Limpiar referencia de tarea activa
         if id_vehiculo in vehicle_ws_manager.active_demos:
             del vehicle_ws_manager.active_demos[id_vehiculo]
 
+
 @router.post("/vehiculos/{id_vehiculo}/demo/iniciar", summary="Iniciar una Demo en el vehículo")
 async def iniciar_demo(id_vehiculo: int, data: DemoTriggerRequest):
-    """Inicia la ejecución asíncrona de una demo validando concurrencia y retorna los movimientos que la componen."""
+    """Inicia la ejecución asíncrona de una demo."""
     if id_vehiculo in vehicle_ws_manager.active_demos and not vehicle_ws_manager.active_demos[id_vehiculo].done():
         raise HTTPException(status_code=400, detail="Ya existe una DEMO en ejecución para este vehículo.")
 
-    # Consultar los movimientos de la demo antes de iniciarla para incluirlos en la respuesta
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
@@ -263,11 +259,9 @@ async def iniciar_demo(id_vehiculo: int, data: DemoTriggerRequest):
     if not movimientos:
         raise HTTPException(status_code=404, detail="La demo no contiene movimientos registrados o no existe.")
 
-    # Lanzar tarea en segundo plano vinculada al vehículo
     task = asyncio.create_task(ejecutar_secuencia_demo(id_vehiculo, data.id_demo))
     vehicle_ws_manager.active_demos[id_vehiculo] = task
 
-    # Sanitizar posibles fechas u horas dentro de los movimientos antes de serializarlos
     movimientos_serializables = limpiar_fechas(movimientos)
 
     return {
@@ -276,9 +270,10 @@ async def iniciar_demo(id_vehiculo: int, data: DemoTriggerRequest):
         "movimientos": movimientos_serializables
     }
 
+
 @router.post("/vehiculos/{id_vehiculo}/demo/cancelar", summary="Cancelar la Demo en ejecución")
 async def cancelar_demo(id_vehiculo: int):
-    """Cancela inmediatamente la emisión de movimientos de la Demo activa para el vehículo."""
+    """Cancela inmediatamente la demo activa."""
     if id_vehiculo in vehicle_ws_manager.active_demos:
         task = vehicle_ws_manager.active_demos[id_vehiculo]
         if not task.done():
@@ -291,7 +286,7 @@ async def cancelar_demo(id_vehiculo: int):
 # --- ENDPOINT WEBSOCKET POR VEHÍCULO ---
 
 def limpiar_fechas(obj):
-    """Convierte de forma recursiva o directa los campos datetime/date a string ISO."""
+    """Convierte de forma recursiva los campos datetime/date a string ISO."""
     if isinstance(obj, dict):
         return {k: limpiar_fechas(v) for k, v in obj.items()}
     elif isinstance(obj, list):
@@ -300,27 +295,20 @@ def limpiar_fechas(obj):
         return obj.isoformat()
     return obj
 
+
 @router.websocket("/ws/vehiculos/{id_vehiculo}")
 async def websocket_vehiculo_endpoint(websocket: WebSocket, id_vehiculo: int):
-    """WebSocket asociado al ID del vehículo. Envía el último estado disponible al conectar y aísla los eventos."""
+    """WebSocket asociado al ID del vehículo."""
     await vehicle_ws_manager.connect(id_vehiculo, websocket)
     
-    # Consultar RDS y enviar el último estado disponible al abrir la conexión
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
             cursor.callproc("sp_obtener_estado", (id_vehiculo,))
             estado_inicial = cursor.fetchone()
-            
-            # 💡 IMPORTANTE: Limpiamos los campos datetime antes de enviarlos por JSON
-            estado_inicial_serializable = limpiar_fechas(estado_inicial) if estado_inicial else {"conectado": False}
 
-            await websocket.send_json({
-                "tipo_evento": "ESTADO_INICIAL",
-                "id_vehiculo": id_vehiculo,
-                "datos": estado_inicial_serializable,
-                "marca_temporal": datetime.now().isoformat()
-            })
+            codigo_inicial = estado_inicial.get("codigo") if estado_inicial else 11
+            await websocket.send_text(str(codigo_inicial))
     except Exception as e:
         await websocket.send_json({"tipo_evento": "ERROR", "detalle": str(e)})
     finally:
