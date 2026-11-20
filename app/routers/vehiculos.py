@@ -1,114 +1,51 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from app.database import get_db_connection
-
-router = APIRouter(prefix="/vehiculos", tags=["Vehículos"])
-
-# Modelos Pydantic para la validación de datos
-class VehiculoCreate(BaseModel):
-    nombre: str
-    modelo: str | None = None
-    descripcion: str | None = None
-    microcontrolador: str | None = None
-
-class VehiculoUpdate(BaseModel):
-    nombre: str
-    modelo: str | None = None
-    descripcion: str | None = None
-    microcontrolador: str | None = None
-    activo: bool
+from fastapi import HTTPException
+from app.core.base_controller import BaseController
+from app.core.decorators import manejar_errores
+from app.repositories.vehiculo_repository import VehiculoRepository
+from app.schemas.schemas import VehiculoCreate, VehiculoUpdate
 
 
-@router.post("/", summary="Crear un nuevo vehículo")
-def crear_vehiculo(data: VehiculoCreate):
-    """Ejecuta el procedimiento almacenado sp_crear_vehiculo[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_crear_vehiculo", (
-                data.nombre,
-                data.modelo,
-                data.descripcion,
-                data.microcontrolador
-            ))
-            connection.commit()
-            resultado = cursor.fetchone()
-            return {
-                "mensaje": "Vehículo creado exitosamente",
-                "id_vehiculo": resultado.get("id_vehiculo") if resultado else None
-            }
-    except Exception as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
+class VehiculoController(BaseController):
+    def __init__(self, repo: VehiculoRepository | None = None):
+        self.repo = repo or VehiculoRepository()
+        super().__init__(prefix="/vehiculos", tags=["Vehículos"])
+
+    def _register_routes(self) -> None:
+        r = self.router
+        r.add_api_route("/", self.crear, methods=["POST"], summary="Crear un nuevo vehículo")
+        r.add_api_route("/", self.listar, methods=["GET"], summary="Obtener todos los vehículos")
+        r.add_api_route("/{id_vehiculo}", self.obtener, methods=["GET"], summary="Obtener un vehículo por ID")
+        r.add_api_route("/{id_vehiculo}", self.actualizar, methods=["PUT"], summary="Actualizar un vehículo")
+        r.add_api_route("/{id_vehiculo}", self.eliminar, methods=["DELETE"], summary="Eliminar un vehículo")
+
+    @manejar_errores
+    def crear(self, data: VehiculoCreate):
+        resultado = self.repo.crear(data)
+        return {
+            "mensaje": "Vehículo creado exitosamente",
+            "id_vehiculo": resultado.get("id_vehiculo") if resultado else None,
+        }
+
+    @manejar_errores
+    def listar(self):
+        return self.repo.listar()
+
+    @manejar_errores
+    def obtener(self, id_vehiculo: int):
+        resultado = self.repo.obtener(id_vehiculo)
+        if not resultado:
+            raise HTTPException(status_code=404, detail="Vehículo no encontrado")
+        return resultado
+
+    @manejar_errores
+    def actualizar(self, id_vehiculo: int, data: VehiculoUpdate):
+        self.repo.actualizar(id_vehiculo, data)
+        return {"mensaje": f"Vehículo con ID {id_vehiculo} actualizado exitosamente"}
+
+    @manejar_errores
+    def eliminar(self, id_vehiculo: int):
+        self.repo.eliminar(id_vehiculo)
+        return {"mensaje": f"Vehículo con ID {id_vehiculo} eliminado exitosamente"}
 
 
-@router.get("/", summary="Obtener todos los vehículos")
-def obtener_vehiculos():
-    """Ejecuta el procedimiento almacenado sp_obtener_vehiculos[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_obtener_vehiculos")
-            return cursor.fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
-
-
-@router.get("/{id_vehiculo}", summary="Obtener un vehículo por ID")
-def obtener_vehiculo(id_vehiculo: int):
-    """Ejecuta el procedimiento almacenado sp_obtener_vehiculo[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_obtener_vehiculo", (id_vehiculo,))
-            resultado = cursor.fetchone()
-            if not resultado:
-                raise HTTPException(status_code=404, detail="Vehículo no encontrado")
-            return resultado
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
-
-
-@router.put("/{id_vehiculo}", summary="Actualizar un vehículo")
-def actualizar_vehiculo(id_vehiculo: int, data: VehiculoUpdate):
-    """Ejecuta el procedimiento almacenado sp_actualizar_vehiculo[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_actualizar_vehiculo", (
-                id_vehiculo,
-                data.nombre,
-                data.modelo,
-                data.descripcion,
-                data.microcontrolador,
-                data.activo
-            ))
-            connection.commit()
-            return {"mensaje": f"Vehículo con ID {id_vehiculo} actualizado exitosamente"}
-    except Exception as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
-
-
-@router.delete("/{id_vehiculo}", summary="Eliminar un vehículo")
-def eliminar_vehiculo(id_vehiculo: int):
-    """Ejecuta el procedimiento almacenado sp_eliminar_vehiculo[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_eliminar_vehiculo", (id_vehiculo,))
-            connection.commit()
-            return {"mensaje": f"Vehículo con ID {id_vehiculo} eliminado exitosamente"}
-    except Exception as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
+router = VehiculoController().router

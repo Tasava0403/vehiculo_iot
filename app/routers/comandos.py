@@ -1,95 +1,43 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from app.database import get_db_connection
-
-router = APIRouter(prefix="/comandos", tags=["Comandos"])
-
-# Modelos Pydantic para validación
-class ComandoCreate(BaseModel):
-    id_vehiculo: int
-    nombre: str
-    codigo: int
-    descripcion: str | None = None
-
-class ComandoUpdate(BaseModel):
-    nombre: str
-    codigo: int
-    descripcion: str | None = None
-    activo: bool
+from app.core.base_controller import BaseController
+from app.core.decorators import manejar_errores
+from app.repositories.comando_repository import ComandoRepository
+from app.schemas.schemas import ComandoCreate, ComandoUpdate
 
 
-@router.post("/", summary="Crear un nuevo comando")
-def crear_comando(data: ComandoCreate):
-    """Ejecuta el procedimiento almacenado sp_crear_comando[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_crear_comando", (
-                data.id_vehiculo,
-                data.nombre,
-                data.codigo,
-                data.descripcion
-            ))
-            connection.commit()
-            resultado = cursor.fetchone()
-            return {
-                "mensaje": "Comando creado exitosamente",
-                "id_comando": resultado.get("id_comando") if resultado else None
-            }
-    except Exception as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
+class ComandoController(BaseController):
+    def __init__(self, repo: ComandoRepository | None = None):
+        self.repo = repo or ComandoRepository()
+        super().__init__(prefix="/comandos", tags=["Comandos"])
+
+    def _register_routes(self) -> None:
+        r = self.router
+        r.add_api_route("/", self.crear, methods=["POST"], summary="Crear un nuevo comando")
+        r.add_api_route("/vehiculo/{id_vehiculo}", self.listar_por_vehiculo, methods=["GET"],
+                        summary="Obtener comandos de un vehículo")
+        r.add_api_route("/{id_comando}", self.actualizar, methods=["PUT"], summary="Actualizar un comando")
+        r.add_api_route("/{id_comando}", self.eliminar, methods=["DELETE"], summary="Eliminar un comando")
+
+    @manejar_errores
+    def crear(self, data: ComandoCreate):
+        resultado = self.repo.crear(data)
+        return {
+            "mensaje": "Comando creado exitosamente",
+            "id_comando": resultado.get("id_comando") if resultado else None,
+        }
+
+    @manejar_errores
+    def listar_por_vehiculo(self, id_vehiculo: int):
+        return self.repo.listar_por_vehiculo(id_vehiculo)
+
+    @manejar_errores
+    def actualizar(self, id_comando: int, data: ComandoUpdate):
+        self.repo.actualizar(id_comando, data)
+        return {"mensaje": f"Comando con ID {id_comando} actualizado exitosamente"}
+
+    @manejar_errores
+    def eliminar(self, id_comando: int):
+        self.repo.eliminar(id_comando)
+        return {"mensaje": f"Comando con ID {id_comando} eliminado exitosamente"}
 
 
-@router.get("/vehiculo/{id_vehiculo}", summary="Obtener comandos de un vehículo")
-def obtener_comandos_vehiculo(id_vehiculo: int):
-    """Ejecuta el procedimiento almacenado sp_obtener_comandos_vehiculo[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_obtener_comandos_vehiculo", (id_vehiculo,))
-            return cursor.fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
-
-
-@router.put("/{id_comando}", summary="Actualizar un comando")
-def actualizar_comando(id_comando: int, data: ComandoUpdate):
-    """Ejecuta el procedimiento almacenado sp_actualizar_comando[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_actualizar_comando", (
-                id_comando,
-                data.nombre,
-                data.codigo,
-                data.descripcion,
-                data.activo
-            ))
-            connection.commit()
-            return {"mensaje": f"Comando con ID {id_comando} actualizado exitosamente"}
-    except Exception as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
-
-
-@router.delete("/{id_comando}", summary="Eliminar un comando")
-def eliminar_comando(id_comando: int):
-    """Ejecuta el procedimiento almacenado sp_eliminar_comando[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_eliminar_comando", (id_comando,))
-            connection.commit()
-            return {"mensaje": f"Comando con ID {id_comando} eliminado exitosamente"}
-    except Exception as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
+router = ComandoController().router

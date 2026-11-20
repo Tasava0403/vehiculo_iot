@@ -1,183 +1,76 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from app.database import get_db_connection
-
-router = APIRouter(prefix="/demos", tags=["Demos y Movimientos"])
-
-# --- Modelos Pydantic para Demos ---
-class DemoCreate(BaseModel):
-    id_vehiculo: int
-    nombre: str
-    descripcion: str | None = None
-
-class DemoUpdate(BaseModel):
-    nombre: str
-    descripcion: str | None = None
-    activo: bool
-
-# --- Modelos Pydantic para Movimientos de Demo ---
-class DemoMovimientoCreate(BaseModel):
-    id_demo: int
-    id_comando: int
-    orden: int
-    duracion_ms: int
-    pausa_ms: int = 0
-
-class DemoMovimientoUpdate(BaseModel):
-    id_comando: int
-    orden: int
-    duracion_ms: int
-    pausa_ms: int
+from app.core.base_controller import BaseController
+from app.core.decorators import manejar_errores
+from app.repositories.demo_repository import DemoRepository
+from app.schemas.schemas import (
+    DemoCreate, DemoUpdate, DemoMovimientoCreate, DemoMovimientoUpdate,
+)
 
 
-# --- ENDPOINTS PARA DEMOS ---
+class DemoController(BaseController):
+    def __init__(self, repo: DemoRepository | None = None):
+        self.repo = repo or DemoRepository()
+        super().__init__(prefix="/demos", tags=["Demos y Movimientos"])
 
-@router.post("/", summary="Crear una nueva demo")
-def crear_demo(data: DemoCreate):
-    """Ejecuta el procedimiento almacenado sp_crear_demo[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_crear_demo", (
-                data.id_vehiculo,
-                data.nombre,
-                data.descripcion
-            ))
-            connection.commit()
-            resultado = cursor.fetchone()
-            return {
-                "mensaje": "Demo creada exitosamente",
-                "id_demo": resultado.get("id_demo") if resultado else None
-            }
-    except Exception as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
+    def _register_routes(self) -> None:
+        r = self.router
+        # Demos
+        r.add_api_route("/", self.crear, methods=["POST"], summary="Crear una nueva demo")
+        r.add_api_route("/vehiculo/{id_vehiculo}", self.listar_por_vehiculo, methods=["GET"],
+                        summary="Obtener demos de un vehículo")
+        r.add_api_route("/{id_demo}", self.actualizar, methods=["PUT"], summary="Actualizar una demo")
+        r.add_api_route("/{id_demo}", self.eliminar, methods=["DELETE"], summary="Eliminar una demo")
+        # Movimientos
+        r.add_api_route("/movimientos", self.agregar_movimiento, methods=["POST"],
+                        summary="Agregar movimiento a una demo")
+        r.add_api_route("/{id_demo}/movimientos", self.obtener_movimientos, methods=["GET"],
+                        summary="Obtener movimientos de una demo")
+        r.add_api_route("/movimientos/{id_demo_movimiento}", self.actualizar_movimiento, methods=["PUT"],
+                        summary="Actualizar movimiento de una demo")
+        r.add_api_route("/movimientos/{id_demo_movimiento}", self.eliminar_movimiento, methods=["DELETE"],
+                        summary="Eliminar movimiento de una demo")
 
+    # --- Demos ---
+    @manejar_errores
+    def crear(self, data: DemoCreate):
+        resultado = self.repo.crear(data)
+        return {
+            "mensaje": "Demo creada exitosamente",
+            "id_demo": resultado.get("id_demo") if resultado else None,
+        }
 
-@router.get("/vehiculo/{id_vehiculo}", summary="Obtener demos de un vehículo")
-def obtener_demos(id_vehiculo: int):
-    """Ejecuta el procedimiento almacenado sp_obtener_demos[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_obtener_demos", (id_vehiculo,))
-            return cursor.fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
+    @manejar_errores
+    def listar_por_vehiculo(self, id_vehiculo: int):
+        return self.repo.listar_por_vehiculo(id_vehiculo)
 
+    @manejar_errores
+    def actualizar(self, id_demo: int, data: DemoUpdate):
+        self.repo.actualizar(id_demo, data)
+        return {"mensaje": f"Demo con ID {id_demo} actualizada exitosamente"}
 
-@router.put("/{id_demo}", summary="Actualizar una demo")
-def actualizar_demo(id_demo: int, data: DemoUpdate):
-    """Ejecuta el procedimiento almacenado sp_actualizar_demo[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_actualizar_demo", (
-                id_demo,
-                data.nombre,
-                data.descripcion,
-                data.activo
-            ))
-            connection.commit()
-            return {"mensaje": f"Demo con ID {id_demo} actualizada exitosamente"}
-    except Exception as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
+    @manejar_errores
+    def eliminar(self, id_demo: int):
+        self.repo.eliminar(id_demo)
+        return {"mensaje": f"Demo con ID {id_demo} eliminada exitosamente"}
 
+    # --- Movimientos ---
+    @manejar_errores
+    def agregar_movimiento(self, data: DemoMovimientoCreate):
+        self.repo.agregar_movimiento(data)
+        return {"mensaje": "Movimiento de demo agregado exitosamente"}
 
-@router.delete("/{id_demo}", summary="Eliminar una demo")
-def eliminar_demo(id_demo: int):
-    """Ejecuta el procedimiento almacenado sp_eliminar_demo[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_eliminar_demo", (id_demo,))
-            connection.commit()
-            return {"mensaje": f"Demo con ID {id_demo} eliminada exitosamente"}
-    except Exception as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
+    @manejar_errores
+    def obtener_movimientos(self, id_demo: int):
+        return self.repo.obtener_movimientos(id_demo)
+
+    @manejar_errores
+    def actualizar_movimiento(self, id_demo_movimiento: int, data: DemoMovimientoUpdate):
+        self.repo.actualizar_movimiento(id_demo_movimiento, data)
+        return {"mensaje": f"Movimiento de demo con ID {id_demo_movimiento} actualizado exitosamente"}
+
+    @manejar_errores
+    def eliminar_movimiento(self, id_demo_movimiento: int):
+        self.repo.eliminar_movimiento(id_demo_movimiento)
+        return {"mensaje": f"Movimiento de demo con ID {id_demo_movimiento} eliminado exitosamente"}
 
 
-# --- ENDPOINTS PARA MOVIMIENTOS DE DEMO ---
-
-@router.post("/movimientos", summary="Agregar movimiento a una demo")
-def agregar_movimiento_demo(data: DemoMovimientoCreate):
-    """Ejecuta el procedimiento almacenado sp_agregar_movimiento_demo[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_agregar_movimiento_demo", (
-                data.id_demo,
-                data.id_comando,
-                data.orden,
-                data.duracion_ms,
-                data.pausa_ms
-            ))
-            connection.commit()
-            return {"mensaje": "Movimiento de demo agregado exitosamente"}
-    except Exception as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
-
-
-@router.get("/{id_demo}/movimientos", summary="Obtener movimientos de una demo")
-def obtener_movimientos_demo(id_demo: int):
-    """Ejecuta el procedimiento almacenado sp_obtener_movimientos_demo[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_obtener_movimientos_demo", (id_demo,))
-            return cursor.fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
-
-
-@router.put("/movimientos/{id_demo_movimiento}", summary="Actualizar movimiento de una demo")
-def actualizar_movimiento_demo(id_demo_movimiento: int, data: DemoMovimientoUpdate):
-    """Ejecuta el procedimiento almacenado sp_actualizar_movimiento_demo[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_actualizar_movimiento_demo", (
-                id_demo_movimiento,
-                data.id_comando,
-                data.orden,
-                data.duracion_ms,
-                data.pausa_ms
-            ))
-            connection.commit()
-            return {"mensaje": f"Movimiento de demo con ID {id_demo_movimiento} actualizado exitosamente"}
-    except Exception as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
-
-
-@router.delete("/movimientos/{id_demo_movimiento}", summary="Eliminar movimiento de una demo")
-def eliminar_movimiento_demo(id_demo_movimiento: int):
-    """Ejecuta el procedimiento almacenado sp_eliminar_movimiento_demo[cite: 1]."""
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.callproc("sp_eliminar_movimiento_demo", (id_demo_movimiento,))
-            connection.commit()
-            return {"mensaje": f"Movimiento de demo con ID {id_demo_movimiento} eliminado exitosamente"}
-    except Exception as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        connection.close()
+router = DemoController().router
